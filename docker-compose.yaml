@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    environment:
+      # You can leave these empty and add endpoints from the UI.
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # OPENAI_API_BASE: ${OPENAI_API_BASE}
+      # AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY}
+      # AZURE_OPENAI_API_BASE: ${AZURE_OPENAI_API_BASE}
+      # AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION}
+      # OLLAMA_BASE_URL: http://ollama:11434
+    volumes:
+      - owui-data:/app/backend/data
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  owui-data:
+  ollama-models:
