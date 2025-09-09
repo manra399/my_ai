@@ -100,7 +100,7 @@ else
 fi
 
 echo ">> Creating/ensuring Container App: $APP_NAME"
-if az containerapp show -g "$RG" -n "$APP_NAME" >/dev/null 2>&1; then
+if ! az containerapp show -g "$RG" -n "$APP_NAME" >/dev/null 2>&1; then
   echo "   App exists."
 else
   az containerapp create \
@@ -121,6 +121,9 @@ fi
 
 echo ">> Mounting Azure Files at ${MOUNT_PATH:-/app/backend/data} (via az resource update)…"
 APP_ID=$(az containerapp show -g "$RG" -n "$APP_NAME" --query id -o tsv)
+VOLUMES_JSON=$(printf '[{"name":"owui-volume","storageName":"owuifiles","storageType":"AzureFile","mountOptions":"nobrl,dir_mode=0777,file_mode=0666"}]')
+MOUNTS_JSON=$(printf '[{"volumeName":"owui-volume","mountPath":"%s"}]' "${MOUNT_PATH:-/app/backend/data}")
+
 
 # Build JSON payloads safely
 VOLUMES_JSON=$(printf '[{"name":"%s","storageName":"%s","storageType":"AzureFile"}]' "owui-volume" "owuifiles")

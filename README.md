@@ -63,3 +63,48 @@ az containerapp show -g $(grep '^RG=' infra/azure/storage-vars.env | cut -d= -f2
 
 # Tail logs if needed
 az containerapp logs show -g owui-rg -n owui --follow
+
+
+
+
+
+Debugging on 9th Sept.
+
+Step-1
+# pick a 64-hex secret or re-use the one in your CI secret
+SECRET=$(openssl rand -hex 32)
+
+az containerapp secret set -g owui-rg -n owui --secrets webui-secret="$SECRET"
+az containerapp update     -g owui-rg -n owui --env-vars WEBUI_SECRET_KEY=secretref:webui-secret
+
+Step2---
+RG=owui-rg
+APP=owui
+APP_ID=$(az containerapp show -g "$RG" -n "$APP" --query id -o tsv)
+
+SECRET=$(openssl rand -hex 32)
+
+# 2) Build JSON payloads (no jq needed)
+SECRETS_JSON=$(printf '[{"name":"%s","value":"%s"}]' "webui-secret" "$SECRET")
+ENVS_JSON='[{"name":"WEBUI_SECRET_KEY","secretRef":"webui-secret"}]'
+VOLUMES_JSON='[{"name":"owui-volume","storageName":"owuifiles","storageType":"AzureFile","mountOptions":"nobrl,dir_mode=0777,file_mode=0666"}]'
+MOUNTS_JSON='[{"volumeName":"owui-volume","mountPath":"/app/backend/data"}]'
+
+# 3) Patch everything atomically (secrets + env + volumes + mounts)
+az resource update --ids "$APP_ID" \
+  --set properties.configuration.secrets="$SECRETS_JSON" \
+        properties.template.containers[0].env="$ENVS_JSON" \
+        properties.template.volumes="$VOLUMES_JSON" \
+        properties.template.containers[0].volumeMounts="$MOUNTS_JSON"
+
+az containerapp update -g "$RG" -n "$APP" --min-replicas 2 --max-replicas 5
+
+REV=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+az containerapp revision restart -g "$RG" -n "$APP" --revision "$REV"
+
+# 4) Roll a fresh revision
+az resource update --ids "$APP_ID" --set properties.template.revisionSuffix="setup$(date +%s)"
+
+# 5) Quick checks
+az containerapp show -g "$RG" -n "$APP" --query "properties.template.{volumes:volumes, mounts:containers[0].volumeMounts}" -o yaml
+az containerapp show -g "$RG" -n "$APP" --query "properties.template.containers[0].env" -o yaml
