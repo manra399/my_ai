@@ -1,3 +1,15 @@
+# OpenWebUI Stack — Local & Azure Container Apps
+
+A compact, batteries-included setup to run **Open WebUI** locally with Docker Compose (optionally with **Ollama**) and to deploy it to **Azure Container Apps** with persistent storage and stable sessions.
+
+- **Local**: `docker compose` for quick testing.
+- **Azure**: one command to deploy, plus optional hardening so you don’t lose chats/models after restarts.
+
+---
+
+## Repository Structure
+
+```plaintext
 openwebui-stack/
 ├─ .env.sample
 ├─ compose/
@@ -12,99 +24,147 @@ openwebui-stack/
 │  └─ aca_show_url.sh
 └─ infra/
    └─ azure/
-      └─ storage-vars.env          # keeps storage and mount names in one place
+      └─ storage-vars.env
+```
 
+# Prerequisites
 
+- Docker Desktop (for local runs)
+- Azure CLI (az) with the Container Apps extension
+- An Azure subscription with permission to create resource groups and Container Apps
 
+Install the extension (once):
 
-Step 1 = az login
+	macOS/Linux (bash)
+ 	az extension add --name containerapp
 
-Step 2 = az extension add --name containerapp
+  	Windows (PowerShell)
+   	az extension add --name containerapp
 
-Step 3 = chmod +x ./scripts/aca_deploy.sh
+# 1) Quick Start — Local (Docker Compose)
+Runs Open WebUI at http://localhost:3000
 
-Step 4 = ./scripts/aca_deploy.sh
+	macOS/Linux (bash)
+	# optional: set WEBUI_PORT or API keys in .env
+	cp .env.sample .env
+	./scripts/local_up.sh
+	
+# 2) Quick Start  — Azure Container Apps (ACA)
+This deploys Open WebUI with external ingress and creates a persistent Azure Files mount at /app/backend/data so your chats/models survive restarts.
 
-Step 5 = ./scripts/aca_show_url.sh
-# outputs something like: owui.somehash.uksouth.azurecontainerapps.io
+Configure variables
+Edit infra/azure/storage-vars.env (these are safe to commit):
 
+	RG=owui-rg
+	LOC=uksouth
+	ENV_NAME=owui-env
+	APP_NAME=owui
+	SA_NAME=owuistorage$RANDOM
+	SHARE_NAME=owui-data
+	MOUNT_PATH=/app/backend/data
+	TARGET_PORT=8080
 
-Step 6---
-First-run setup in the UI
-Create the admin account when prompted.
-Go to Settings → Models.
-Manually add any providers you want:
-OpenAI / OpenAI-compatible: paste API key + Base URL (e.g. https://api.openai.com/v1 or the provider’s URL).
-Azure OpenAI: paste API key + https://<your-resource>.openai.azure.com, set the API version, and select the deployment name as the model.
-Ollama: set Base URL to your Ollama host (e.g. http://<ip-or-dns>:11434). You manage model pulls on the Ollama server; Open WebUI will auto-list them.
-All of these are stored under /app/backend/data on your Azure Files mount—so they persist across restarts/revisions.
+# Deploy
+## macOS/Linux (bash):
 
+	az login
+ 
+	chmod +x ./scripts/aca_deploy.sh
+	./scripts/aca_deploy.sh
+	./scripts/aca_show_url.sh
 
-------------------
+## Windows (PowerShell):
 
-Step 7---
-4) (Optional) Change anything later—no rebuild needed
-If you ever want to update environment variables instead of using the UI:
-# examples; safe to skip if you configure only in the UI
-./scripts/aca_update_env.sh OPENAI_API_BASE=https://api.openai.com/v1
-./scripts/aca_update_env.sh OLLAMA_BASE_URL=http://10.0.0.5:11434
-./scripts/aca_update_env.sh OPENAI_API_KEY=
+	az login
+	
+	# make sure your shell can execute .sh (Git Bash) OR run the same commands inline in PowerShell (see below).
+	bash ./scripts/aca_deploy.sh
+	bash ./scripts/aca_show_url.sh
 
+The URL will look like:
 
+	https://owui.<something>.<region>.azurecontainerapps.io/
 
-------------------
+# First-run in the UI
 
-Step 8---
-5) (Optional) Verify it’s healthy
-# Show current revision & ingress
-az containerapp show -g $(grep '^RG=' infra/azure/storage-vars.env | cut -d= -f2) \
-  -n $(grep '^APP_NAME=' infra/azure/storage-vars.env | cut -d= -f2) \
-  --query "{fqdn:properties.configuration.ingress.fqdn, activeRev:properties.latestRevisionName}" -o yaml
+	1.Open the URL, create the admin account.
+	2.Go to Settings → Models and add any providers you want:
+		- OpenAI / OpenAI-compatible: API key + Base URL (e.g. https://api.openai.com/v1).
+		- Azure OpenAI: API key + https://<your-resource>.openai.azure.com, set API version, choose deployment name as the model.
+		- Ollama: Base URL (e.g. http://<ip-or-dns>:11434). Model pulls happen on the Ollama host; Open WebUI will list them.
+	These settings are stored under /app/backend/data on the mounted Azure Files share, so they persist.
 
-# Tail logs if needed
-az containerapp logs show -g owui-rg -n owui --follow
+# Hardening (Persistence + Stable Sessions)
+To avoid losing sessions and ensure chats/models persist across updates:
 
+A) Set a stable session secret
 
+	macOS/Linux (bash):
+ 
+  		RG=owui-rg; APP=owui
+		APP_ID=$(az containerapp show -g "$RG" -n "$APP" --query id -o tsv)
+		SECRET=$(openssl rand -hex 32)
+		SECRETS_JSON=$(printf '[{"name":"%s","value":"%s"}]' "webui-secret" "$SECRET")
+		ENVS_JSON='[{"name":"WEBUI_SECRET_KEY","secretRef":"webui-secret"}]'
+		
+		az resource update --ids "$APP_ID" \
+		  --set properties.configuration.secrets="$SECRETS_JSON" \
+		        properties.template.containers[0].env="$ENVS_JSON"
+		
+		# restart the latest revision (safe)
+		REV=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+		az containerapp revision restart -g "$RG" -n "$APP" --revision "$REV"
 
+  Windows (PowerShell):
+    
+	$rg="owui-rg"; $app="owui"
+	$appId = az containerapp show -g $rg -n $app --query id -o tsv
+	
+	# 32 bytes -> 64 hex chars
+	$bytes = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+	$secret = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ''
+	$secrets = "[{""name"":""webui-secret"",""value"":""$secret""}]"
+	$envs    = "[{""name"":""WEBUI_SECRET_KEY"",""secretRef"":""webui-secret""}]"
+	
+	az resource update --ids $appId --set `
+	  properties.configuration.secrets="$secrets" `
+	  properties.template.containers[0].env="$envs"
+	
+	$rev = az containerapp show -g $rg -n $app --query properties.latestRevisionName -o tsv
+	az containerapp revision restart -g $rg -n $app --revision $rev
+	
+B) Ensure the Azure Files mount is active (with nobrl)
+	
+ macOS/Linux (bash):
+    
+	RG=owui-rg; APP=owui
+	APP_ID=$(az containerapp show -g "$RG" -n "$APP" --query id -o tsv)
+	VOLUMES='[{"name":"owui-volume","storageName":"owuifiles","storageType":"AzureFile","mountOptions":"nobrl,dir_mode=0777,file_mode=0666"}]'
+	MOUNTS='[{"volumeName":"owui-volume","mountPath":"/app/backend/data"}]'
+	
+	az resource update --ids "$APP_ID" \
+	  --set properties.template.volumes="$VOLUMES" \
+	        properties.template.containers[0].volumeMounts="$MOUNTS"
+	
+	# quick check inside the container
+	az containerapp exec -g "$RG" -n "$APP" --command "sh -lc 'mount | grep /app/backend/data; ls -lh /app/backend/data/webui.db || echo NO_DB'"
 
+ Windows (PowerShell):
 
-Debugging on 9th Sept.
+	$rg="owui-rg"; $app="owui"
+	$appId = az containerapp show -g $rg -n $app --query id -o tsv
+	$vols  = '[{"name":"owui-volume","storageName":"owuifiles","storageType":"AzureFile","mountOptions":"nobrl,dir_mode=0777,file_mode=0666"}]'
+	$mount = '[{"volumeName":"owui-volume","mountPath":"/app/backend/data"}]'
+	
+	az resource update --ids $appId --set `
+	  properties.template.volumes="$vols" `
+	  properties.template.containers[0].volumeMounts="$mount"
+	
+	# verify
+	az containerapp exec -g $rg -n $app --command "sh -lc 'mount | grep /app/backend/data; ls -lh /app/backend/data/webui.db || echo NO_DB'"
 
-Step-1
-# pick a 64-hex secret or re-use the one in your CI secret
-SECRET=$(openssl rand -hex 32)
+ # C) Keep a single replica if using the default SQLite DB
 
-az containerapp secret set -g owui-rg -n owui --secrets webui-secret="$SECRET"
-az containerapp update     -g owui-rg -n owui --env-vars WEBUI_SECRET_KEY=secretref:webui-secret
+ 	az containerapp update -g owui-rg -n owui --min-replicas 1 --max-replicas 1
 
-Step2---
-RG=owui-rg
-APP=owui
-APP_ID=$(az containerapp show -g "$RG" -n "$APP" --query id -o tsv)
-
-SECRET=$(openssl rand -hex 32)
-
-# 2) Build JSON payloads (no jq needed)
-SECRETS_JSON=$(printf '[{"name":"%s","value":"%s"}]' "webui-secret" "$SECRET")
-ENVS_JSON='[{"name":"WEBUI_SECRET_KEY","secretRef":"webui-secret"}]'
-VOLUMES_JSON='[{"name":"owui-volume","storageName":"owuifiles","storageType":"AzureFile","mountOptions":"nobrl,dir_mode=0777,file_mode=0666"}]'
-MOUNTS_JSON='[{"volumeName":"owui-volume","mountPath":"/app/backend/data"}]'
-
-# 3) Patch everything atomically (secrets + env + volumes + mounts)
-az resource update --ids "$APP_ID" \
-  --set properties.configuration.secrets="$SECRETS_JSON" \
-        properties.template.containers[0].env="$ENVS_JSON" \
-        properties.template.volumes="$VOLUMES_JSON" \
-        properties.template.containers[0].volumeMounts="$MOUNTS_JSON"
-
-az containerapp update -g "$RG" -n "$APP" --min-replicas 2 --max-replicas 5
-
-REV=$(az containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
-az containerapp revision restart -g "$RG" -n "$APP" --revision "$REV"
-
-# 4) Roll a fresh revision
-az resource update --ids "$APP_ID" --set properties.template.revisionSuffix="setup$(date +%s)"
-
-# 5) Quick checks
-az containerapp show -g "$RG" -n "$APP" --query "properties.template.{volumes:volumes, mounts:containers[0].volumeMounts}" -o yaml
-az containerapp show -g "$RG" -n "$APP" --query "properties.template.containers[0].env" -o yaml
+  
